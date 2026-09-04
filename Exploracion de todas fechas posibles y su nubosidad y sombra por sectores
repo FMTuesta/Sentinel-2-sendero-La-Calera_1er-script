@@ -1,0 +1,266 @@
+// ======================================================
+// SENTINEL-2: NUBOSIDAD POR SECTOR
+// Todas las imágenes disponibles +/- 5 días
+// ======================================================
+
+
+// ------------------------------------------------------
+// 1. SECTORES
+// ------------------------------------------------------
+
+var sectores = ee.FeatureCollection(
+  'projects/ee-fernandatuesta/assets/sendero30x10m_52s'
+);
+
+Map.addLayer(sectores, {}, 'Sectores');
+Map.centerObject(sectores);
+
+
+// ------------------------------------------------------
+// 2. FECHAS DE MUESTREO
+// ------------------------------------------------------
+
+var fechas = [
+  '2023-10-04',
+  '2023-10-09',
+  '2023-11-11',
+  '2023-12-11',
+  '2024-01-05',
+  '2024-01-26',
+  '2024-03-07',
+  '2024-03-29',
+  '2024-04-18',
+  '2024-05-10',
+  '2024-06-06',
+  '2024-07-18',
+  '2024-08-15',
+  '2024-09-24',
+  '2024-10-03',
+  '2024-10-26',
+  '2024-11-09',
+  '2024-12-09',
+  '2024-12-27'
+];
+
+
+// ------------------------------------------------------
+// 3. COLECCIÓN SENTINEL-2
+// ------------------------------------------------------
+
+var S2 = ee.ImageCollection(
+  'COPERNICUS/S2_SR_HARMONIZED'
+);
+
+
+// ------------------------------------------------------
+// 4. FUNCIÓN PARA CALCULAR NUBOSIDAD POR SECTOR
+// ------------------------------------------------------
+
+function nubosidadPorSector(image, fechaMuestreo) {
+
+  var scl = image.select('SCL');
+
+
+  // ----------------------------------------------------
+  // NUBES
+  // SCL 8 = nube, probabilidad media
+  // SCL 9 = nube, probabilidad alta
+  // SCL 10 = cirrus
+  // ----------------------------------------------------
+
+  var nube = scl.eq(8)
+    .or(scl.eq(9))
+    .or(scl.eq(10))
+    .rename('nube');
+
+
+  // ----------------------------------------------------
+  // SOMBRA DE NUBE
+  // SCL 3 = cloud shadow
+  // ----------------------------------------------------
+
+  var sombra = scl.eq(3)
+    .rename('sombra');
+
+
+  // ----------------------------------------------------
+  // EXTRAER PROMEDIO DE NUBE Y SOMBRA
+  // ----------------------------------------------------
+
+  var datos = ee.Image.cat([
+    nube,
+    sombra
+  ]).reduceRegions({
+
+    collection: sectores,
+
+    reducer: ee.Reducer.mean(),
+
+    scale: 10
+  });
+
+
+  // ----------------------------------------------------
+  // AGREGAR INFORMACIÓN
+  // ----------------------------------------------------
+
+  return datos.map(function(feature) {
+
+    var fechaImagen = image.date();
+
+
+    // Como nube y sombra son imágenes binarias
+    // (0 = no / 1 = sí), su media es la proporción
+    // de píxeles con nube o sombra.
+
+    var porcentajeNube = ee.Number(
+      feature.get('nube')
+    ).multiply(100);
+
+    var porcentajeSombra = ee.Number(
+      feature.get('sombra')
+    ).multiply(100);
+
+
+    return feature.set({
+
+      // ----------------------------------------------
+      // IDENTIFICACIÓN
+      // ----------------------------------------------
+
+      'sector': feature.get('sector'),
+
+      'fecha_muestreo': fechaMuestreo,
+
+      'fecha_imagen': fechaImagen.format(
+        'YYYY-MM-dd'
+      ),
+
+      // ----------------------------------------------
+      // DIFERENCIA DE FECHAS
+      // ----------------------------------------------
+
+      'diferencia_dias': fechaImagen.difference(
+        ee.Date(fechaMuestreo),
+        'day'
+      ),
+
+      // ----------------------------------------------
+      // HORARIOS
+      // ----------------------------------------------
+
+      'hora_UTC': fechaImagen.format(
+        'HH:mm:ss'
+      ),
+
+      'hora_local': fechaImagen
+        .advance(-3, 'hour')
+        .format('HH:mm:ss'),
+
+      // ----------------------------------------------
+      // NUBOSIDAD POR SECTOR
+      // ----------------------------------------------
+
+      'porcentaje_nube_sector': porcentajeNube,
+
+      'porcentaje_sombra_sector': porcentajeSombra,
+
+      // ----------------------------------------------
+      // ID DE LA IMAGEN
+      // ----------------------------------------------
+
+      'ID_imagen': image.id()
+    });
+  });
+}
+
+
+// ------------------------------------------------------
+// 5. BUSCAR IMÁGENES +/- 5 DÍAS
+// ------------------------------------------------------
+
+function buscarFecha(fechaTexto) {
+
+  var fecha = ee.Date(fechaTexto);
+
+  var inicio = fecha.advance(-5, 'day');
+
+  // +6 porque filterDate tiene límite superior exclusivo
+  var fin = fecha.advance(6, 'day');
+
+
+  var coleccion = S2
+    .filterDate(inicio, fin)
+    .filterBounds(sectores);
+
+
+  // Para cada imagen encontrada:
+  // calcular nubosidad de los 52 sectores.
+
+  return coleccion.map(function(image) {
+
+    return nubosidadPorSector(
+      image,
+      fechaTexto
+    );
+
+  }).flatten();
+}
+
+
+// ------------------------------------------------------
+// 6. APLICAR A TODAS LAS FECHAS
+// ------------------------------------------------------
+
+var resultados = ee.FeatureCollection(
+  fechas.map(buscarFecha)
+).flatten();
+
+
+// ------------------------------------------------------
+// 7. ORDENAR
+// ------------------------------------------------------
+
+resultados = resultados.sort(
+  'fecha_muestreo'
+);
+
+
+// ------------------------------------------------------
+// 8. MOSTRAR RESULTADOS
+// ------------------------------------------------------
+
+print(
+  'Nubosidad por sector - todas las fechas +/- 5 días',
+  resultados
+);
+
+print(
+  'Cantidad total de registros',
+  resultados.size()
+);
+
+
+// ------------------------------------------------------
+// 9. EXPORTAR
+// ------------------------------------------------------
+
+Export.table.toDrive({
+
+  collection: resultados.select([
+    'sector',
+    'fecha_muestreo',
+    'fecha_imagen',
+    'diferencia_dias',
+    'hora_UTC',
+    'hora_local',
+    'porcentaje_nube_sector',
+    'porcentaje_sombra_sector',
+    'ID_imagen'
+  ]),
+
+  description:
+    'nubosidad_por_sector_todas_las_fechas',
+
+  fileFormat: 'CSV'
+});
