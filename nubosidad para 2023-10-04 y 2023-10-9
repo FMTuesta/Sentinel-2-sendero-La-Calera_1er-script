@@ -1,0 +1,133 @@
+
+// Explorando qué fechas tengo disponibles para utilizar Sentinel-2
+
+var sectores = ee.FeatureCollection('projects/ee-fernandatuesta/assets/sendero30x10m_52s');
+
+Map.addLayer(sectores, {}, 'Sectores');
+Map.centerObject(sectores);
+
+var fecha_muestreo = ee.Date('2023-10-04');
+
+var S2_col = ee.ImageCollection('COPERNICUS/S2_SR_HARMONIZED')
+  .filterDate(
+    fecha_muestreo.advance(-5, 'day'),
+    fecha_muestreo.advance(6, 'day')
+  )
+  .filterBounds(sectores)
+  .filter(ee.Filter.lt('CLOUDY_PIXEL_PERCENTAGE', 50));
+
+print('Imágenes disponibles', S2_col.size());
+print('Colección', S2_col);
+
+// ---------------------------------------------------------
+// SELECCIONAR SOLAMENTE LAS IMÁGENES DEL 04 Y 09 DE OCTUBRE - las dos primeras fechas muestreadas
+// ---------------------------------------------------------
+
+var imagen_04 = S2_col.filterDate(
+  '2023-10-04',
+  '2023-10-05'
+).first();
+
+var imagen_09 = S2_col.filterDate(
+  '2023-10-09',
+  '2023-10-10'
+).first();
+
+print('Imagen 04/10/2023', imagen_04);
+print('Imagen 09/10/2023', imagen_09);
+
+// ---------------------------------------------------------
+// FUNCIÓN PARA CALCULAR NUBOSIDAD POR SECTOR (52 sectores)
+// ---------------------------------------------------------
+function nubosidadPorSector(image) {
+
+  var scl = image.select('SCL');
+
+  // 1 = nube; 0 = no nube
+  // SCL 8 = nube probabilidad media
+  // SCL 9 = nube probabilidad alta
+  // SCL 10 = cirrus
+  var nube = scl.eq(8)
+    .or(scl.eq(9))
+    .or(scl.eq(10))
+    .rename('nube');
+
+  var nubosidad_general = image.get('CLOUDY_PIXEL_PERCENTAGE');
+
+  var datos = nube.reduceRegions({
+    collection: sectores,
+    reducer: ee.Reducer.mean(),
+    scale: 10
+  });
+
+  return datos.map(function(feature) {
+
+    var nube_mean = feature.get('mean');
+
+    var porcentaje_nube = ee.Algorithms.If(
+      ee.Algorithms.IsEqual(nube_mean, null),
+      null,
+      ee.Number(nube_mean).multiply(100)
+    );
+
+    return feature.set({
+      'sector': feature.get('sector'),
+
+      'fecha': image.date().format('YYYY-MM-dd'),
+
+      // Hora original de Sentinel-2
+      'hora': image.date().format('HH:mm:ss'),
+
+      // Nubosidad de toda la escena
+      'nubosidad_general': nubosidad_general,
+
+      // Nubosidad específicamente dentro del sector
+      'porcentaje_nube_sector': porcentaje_nube
+    });
+  });
+}
+
+
+// --------------------------------------------------
+// CALCULAR NUBOSIDAD POR SECTOR
+// --------------------------------------------------
+
+var resultados_04 = nubosidadPorSector(imagen_04);
+
+var resultados_09 = nubosidadPorSector(imagen_09);
+
+
+// Unir ambas fechas
+var resultados = resultados_04.merge(resultados_09);
+
+
+// --------------------------------------------------
+// VER RESULTADOS
+// --------------------------------------------------
+
+print(
+  'Nubosidad por sector - 04 y 09 de octubre',
+  resultados
+);
+
+print(
+  'Cantidad de elementos',
+  resultados.size()
+);
+
+
+// --------------------------------------------------
+// EXPORTAR CSV
+// --------------------------------------------------
+
+Export.table.toDrive({
+  collection: resultados.select([
+    'sector',
+    'fecha',
+    'hora',
+    'nubosidad_general',
+    'porcentaje_nube_sector'
+  ]),
+  description: 'nubosidad_sectores_2023-10-04_2023-10-09',
+  fileFormat: 'CSV'
+});
