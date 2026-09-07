@@ -1,0 +1,370 @@
+// ======================================================
+// SENTINEL-2: NUBOSIDAD + ÍNDICES POR SECTOR
+// Todas las imágenes disponibles +/- 5 días
+// ======================================================
+
+
+// ------------------------------------------------------
+// 1. SECTORES
+// ------------------------------------------------------
+
+var sectores = ee.FeatureCollection(
+  'projects/ee-fernandatuesta/assets/sendero30x10m_52s'
+);
+
+Map.addLayer(sectores, {}, 'Sectores');
+Map.centerObject(sectores);
+
+
+// ------------------------------------------------------
+// 2. FECHAS DE MUESTREO
+// ------------------------------------------------------
+
+var fechas = [
+  '2023-11-11',
+  '2023-12-11',
+  '2024-01-05',
+  '2024-01-26',
+  '2024-03-07',
+  '2024-03-29',
+  '2024-04-18',
+  '2024-05-10',
+  '2024-06-06',
+  '2024-07-18',
+  '2024-08-15',
+  '2024-09-24',
+  '2024-10-03',
+  '2024-10-26',
+  '2024-11-09',
+  '2024-12-09',
+  '2024-12-27'
+];
+
+
+// ------------------------------------------------------
+// 3. COLECCIÓN SENTINEL-2
+// ------------------------------------------------------
+
+var S2 = ee.ImageCollection(
+  'COPERNICUS/S2_SR_HARMONIZED'
+);
+
+
+// ------------------------------------------------------
+// 4. CALCULAR ÍNDICES
+// ------------------------------------------------------
+
+function calcularIndices(image) {
+
+  // NDVI
+  var NDVI = image.normalizedDifference([
+    'B8',
+    'B4'
+  ]).rename('NDVI');
+
+
+  // NDMI
+  var NDMI = image.normalizedDifference([
+    'B8',
+    'B11'
+  ]).rename('NDMI');
+
+
+  // NDRE
+  var NDRE = image.normalizedDifference([
+    'B8A',
+    'B5'
+  ]).rename('NDRE');
+
+
+  // SAVI
+  var SAVI = image.expression(
+    '1.5 * ((NIR - RED) / (NIR + RED + 0.5))',
+    {
+      NIR: image.select('B8'),
+      RED: image.select('B4')
+    }
+  ).rename('SAVI');
+
+
+  // EVI
+  var EVI = image.expression(
+    '2.5 * ((NIR - RED) / (NIR + 6 * RED - 7.5 * BLUE + 1))',
+    {
+      NIR: image.select('B8'),
+      RED: image.select('B4'),
+      BLUE: image.select('B2')
+    }
+  ).rename('EVI');
+
+
+  // MSI
+  var MSI = image.select('B11')
+    .divide(image.select('B8'))
+    .rename('MSI');
+
+
+  // CIRE
+  var CIRE = image.select('B8A')
+    .divide(image.select('B5'))
+    .subtract(1)
+    .rename('CIRE');
+
+
+  // MTCI
+  var MTCI = image.expression(
+    '(B6 - B5) / (B5 - B4)',
+    {
+      B4: image.select('B4'),
+      B5: image.select('B5'),
+      B6: image.select('B6')
+    }
+  ).rename('MTCI');
+
+
+  return image.addBands([
+    NDVI,
+    EVI,
+    SAVI,
+    NDMI,
+    MSI,
+    NDRE,
+    CIRE,
+    MTCI
+  ]);
+}
+
+
+// ------------------------------------------------------
+// 5. FUNCIÓN: NUBOSIDAD + ÍNDICES POR SECTOR
+// ------------------------------------------------------
+
+function datosPorSector(image, fechaMuestreo) {
+
+  // Primero calculamos los índices
+  image = calcularIndices(image);
+
+
+  // ----------------------------------------------------
+  // SCL
+  // ----------------------------------------------------
+
+  var scl = image.select('SCL');
+
+
+  // Nubes:
+  // 8 = cloud medium probability
+  // 9 = cloud high probability
+  // 10 = cirrus
+
+  var nube = scl.eq(8)
+    .or(scl.eq(9))
+    .or(scl.eq(10))
+    .rename('nube');
+
+
+  // Sombra:
+  // 3 = cloud shadow
+
+  var sombra = scl.eq(3)
+    .rename('sombra');
+
+
+  // ----------------------------------------------------
+  // BANDAS QUE QUEREMOS EXTRAER
+  // ----------------------------------------------------
+
+  var imagenExtraccion = image.select([
+    'NDVI',
+    'EVI',
+    'SAVI',
+    'NDMI',
+    'MSI',
+    'NDRE',
+    'CIRE',
+    'MTCI'
+  ]).addBands([
+    nube,
+    sombra
+  ]);
+
+
+  // ----------------------------------------------------
+  // PROMEDIO DE CADA VARIABLE POR SECTOR
+  // ----------------------------------------------------
+
+  var datos = imagenExtraccion.reduceRegions({
+
+    collection: sectores,
+
+    reducer: ee.Reducer.mean(),
+
+    scale: 10
+  });
+
+
+  // ----------------------------------------------------
+  // AGREGAR INFORMACIÓN DE LA IMAGEN
+  // ----------------------------------------------------
+
+  return datos.map(function(feature) {
+
+    var fechaImagen = image.date();
+
+
+    // --------------------------------------------------
+    // PORCENTAJES DE NUBE Y SOMBRA
+    // --------------------------------------------------
+
+    var porcentajeNube = ee.Number(
+      feature.get('nube')
+    ).multiply(100);
+
+
+    var porcentajeSombra = ee.Number(
+      feature.get('sombra')
+    ).multiply(100);
+    
+    return feature.set({
+
+     // Nombres de columnas
+     
+     'sector': feature.get('sector'),
+
+    'fecha_muestreo': fechaMuestreo,
+
+    'fecha_imagen': fechaImagen.format(
+      'YYYY-MM-dd'
+    ),
+    
+    'id_sector_imagen':
+  ee.String(feature.get('sector'))
+    .cat('_')
+    .cat(image.date().format('YYYYMMdd')),
+
+    'diferencia_dias': fechaImagen.difference(
+      ee.Date(fechaMuestreo),
+      'day'
+    ),
+
+    'hora_UTC': fechaImagen.format(
+      'HH:mm:ss'
+    ),
+
+    'hora_local': fechaImagen
+      .advance(-3, 'hour')
+      .format('HH:mm:ss'),
+
+    'porcentaje_nube_sector':
+      porcentajeNube,
+
+    'porcentaje_sombra_sector':
+      porcentajeSombra,
+
+    'ID_imagen': image.id()
+  });
+});
+}
+
+
+// ------------------------------------------------------
+// 6. BUSCAR IMÁGENES +/- 5 DÍAS
+// ------------------------------------------------------
+
+function buscarFecha(fechaTexto) {
+
+  var fecha = ee.Date(fechaTexto);
+
+  var inicio = fecha.advance(-5, 'day');
+
+  // +6 porque el límite superior de filterDate
+  // es exclusivo
+  var fin = fecha.advance(6, 'day');
+
+
+  var coleccion = S2
+    .filterDate(inicio, fin)
+    .filterBounds(sectores);
+
+
+  // Para cada imagen:
+  // calcular índices + nubosidad de los 52 sectores
+
+  return coleccion.map(function(image) {
+
+    return datosPorSector(
+      image,
+      fechaTexto
+    );
+
+  }).flatten();
+}
+
+
+// ------------------------------------------------------
+// 7. APLICAR A TODAS LAS FECHAS
+// ------------------------------------------------------
+
+var resultados = ee.FeatureCollection(
+  fechas.map(buscarFecha)
+).flatten();
+
+
+// ------------------------------------------------------
+// 8. ORDENAR
+// ------------------------------------------------------
+
+resultados = resultados.sort(
+  'fecha_muestreo'
+);
+
+
+// ------------------------------------------------------
+// 9. MOSTRAR RESULTADOS
+// ------------------------------------------------------
+
+print(
+  'Nubosidad e índices por sector - todas las fechas +/- 5 días',
+  resultados
+);
+
+print(
+  'Cantidad total de registros',
+  resultados.size()
+);
+
+
+// ------------------------------------------------------
+// 10. EXPORTAR CSV
+// ------------------------------------------------------
+
+Export.table.toDrive({
+
+  collection: resultados.select([
+    'sector',
+    'fecha_muestreo',
+    'fecha_imagen',
+    'diferencia_dias',
+    'hora_UTC',
+    'hora_local',
+
+    'porcentaje_nube_sector',
+    'porcentaje_sombra_sector',
+
+    'NDVI',
+    'EVI',
+    'SAVI',
+    'NDMI',
+    'MSI',
+    'NDRE',
+    'CIRE',
+    'MTCI',
+
+    'ID_imagen'
+  ]),
+
+  description:
+    'Sentinel2_nubosidad_indices_por_sector',
+
+  fileFormat: 'CSV'
+});
