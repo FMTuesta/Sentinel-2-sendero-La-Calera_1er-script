@@ -1,8 +1,10 @@
 
-// ======================================================
+ // ======================================================
 // SENTINEL-2: NUBOSIDAD + INDICES POR SECTOR
 // Todas las imagenes disponibles +/- 5 dias
-// Solo NDVI, SAVI y EVI
+// NDVI, SAVI, EVI, NDMI y MSI
+// Indices calculados con mascara de nubes y sombras
+// Porcentajes de nube y sombra calculados por separado
 // ======================================================
 
 
@@ -58,55 +60,82 @@ var S2 = ee.ImageCollection(
 
 
 // ------------------------------------------------------
-// 4. CALCULAR SOLO NDVI, SAVI Y EVI
+// 4. CALCULAR NDVI, SAVI, EVI, NDMI Y MSI
 // ------------------------------------------------------
 
 function calcularIndices(image) {
 
-  // NDVI
+  // NDVI: verdor de la vegetacion
   var NDVI = image.normalizedDifference([
     'B8',
     'B4'
   ]).rename('NDVI');
 
-  // SAVI, con L = 0.5
-  var SAVI = image.expression(
-    '1.5 * ((NIR - RED) / (NIR + RED + 0.5))',
-    {
-      NIR: image.select('B8'),
-      RED: image.select('B4')
-    }
-  ).rename('SAVI');
 
-  // EVI
-  var EVI = image.expression(
-    '2.5 * ((NIR - RED) / (NIR + 6 * RED - 7.5 * BLUE + 1))',
-    {
-      NIR: image.select('B8'),
-      RED: image.select('B4'),
-      BLUE: image.select('B2')
-    }
-  ).rename('EVI');
+  // Reflectancia escalada de 0 a 1
+  var NIR = image.select('B8').multiply(0.0001);
+  var RED = image.select('B4').multiply(0.0001);
+  var BLUE = image.select('B2').multiply(0.0001);
+
+
+  // SAVI: indice ajustado por el suelo (L = 0.5)
+  var SAVI = NIR.subtract(RED)
+    .multiply(1.5)
+    .divide(
+      NIR.add(RED).add(0.5)
+    )
+    .rename('SAVI');
+
+
+  // EVI: indice de vegetacion mejorado
+  var EVI = NIR.subtract(RED)
+    .multiply(2.5)
+    .divide(
+      NIR
+        .add(RED.multiply(6))
+        .subtract(BLUE.multiply(7.5))
+        .add(1)
+    )
+    .rename('EVI');
+
+
+  // NDMI: indice de humedad de la vegetacion
+  var NDMI = image.normalizedDifference([
+    'B8',
+    'B11'
+  ]).rename('NDMI');
+
+
+  // MSI: indice de estres hidrico
+  // Valores altos suelen indicar menor contenido de agua
+  var MSI = image.select('B11')
+    .divide(image.select('B8'))
+    .rename('MSI');
+
 
   return image.addBands([
     NDVI,
     SAVI,
-    EVI
+    EVI,
+    NDMI,
+    MSI
   ]);
 }
 
 
 // ------------------------------------------------------
-// 5. NUBOSIDAD, SOMBRA E INDICES POR SECTOR
+// 5. MASCARA DE NUBES Y SOMBRAS + DATOS POR SECTOR
 // ------------------------------------------------------
 
 function datosPorSector(image, fechaMuestreo) {
 
-  // Calcular indices
-  image = calcularIndices(image);
-
-  // Clasificacion SCL de Sentinel-2
+  // Conservar la clasificacion SCL original
   var scl = image.select('SCL');
+
+
+  // --------------------------------------------------
+  // 5A. IDENTIFICAR NUBES Y SOMBRAS
+  // --------------------------------------------------
 
   // Nubes: clases 8, 9 y 10
   var nube = scl.eq(8)
@@ -114,60 +143,106 @@ function datosPorSector(image, fechaMuestreo) {
     .or(scl.eq(10))
     .rename('nube');
 
-  // Sombra de nubes: clase 3
+  // Sombras de nubes: clase 3
   var sombra = scl.eq(3)
     .rename('sombra');
 
-  // Bandas que se van a extraer
-  var imagenExtraccion = image.select([
-    'NDVI',
-    'SAVI',
-    'EVI'
-  ]).addBands([
+
+  // --------------------------------------------------
+  // 5B. CREAR MASCARA DE PIXELES VALIDOS
+  // --------------------------------------------------
+
+  // Excluir:
+  // 0 = sin datos
+  // 1 = saturado o defectuoso
+  // 3 = sombra de nube
+  // 8 = nube de probabilidad media
+  // 9 = nube de probabilidad alta
+  // 10 = cirros
+  //
+  // Se conservan las demas clases SCL.
+
+  var mascara = scl.neq(0)
+    .and(scl.neq(1))
+    .and(scl.neq(3))
+    .and(scl.neq(8))
+    .and(scl.neq(9))
+    .and(scl.neq(10));
+
+
+  // Aplicar mascara a las bandas de la imagen
+  var imagenLimpia = image.updateMask(mascara);
+
+
+  // --------------------------------------------------
+  // 5C. CALCULAR INDICES CON LA MASCARA APLICADA
+  // --------------------------------------------------
+
+  var imagenIndices = calcularIndices(imagenLimpia)
+    .select([
+      'NDVI',
+      'SAVI',
+      'EVI',
+      'NDMI',
+      'MSI'
+    ]);
+
+
+  // --------------------------------------------------
+  // 5D. EXTRAER INDICES Y PORCENTAJES POR SEPARADO
+  // --------------------------------------------------
+
+  // Las bandas nube y sombra provienen del SCL original.
+  // No se enmascaran: deben permitir cuantificar
+  // los pixeles clasificados como nube o sombra.
+
+  var imagenExtraccion = imagenIndices.addBands([
     nube,
     sombra
   ]);
 
-  // Promedio por sector
+
+  // Promedio por sector.
+  // Cada banda se reduce usando sus propios pixeles validos.
   var datos = imagenExtraccion.reduceRegions({
     collection: sectores,
     reducer: ee.Reducer.mean(),
     scale: 10
   });
 
-  // Agregar metadatos de la imagen
+
+  // --------------------------------------------------
+  // 5E. AGREGAR METADATOS Y PORCENTAJES
+  // --------------------------------------------------
+
   return datos.map(function(feature) {
 
     var fechaImagen = image.date();
-
-    // La propiedad del sector debe llamarse "Sector"
     var sector = feature.get('Sector');
 
-    
-  // ----------------------------------------------------
-  // PORCENTAJES DE NUBE Y SOMBRA
-  // Conservar 0 cuando no hay nubes/sombras.
-  // Conservar null cuando no hay datos validos.
-  // ----------------------------------------------------
 
-   var valorNube = feature.get('nube');
-   
-   var porcentajeNube = ee.Algorithms.If(
-   ee.Algorithms.IsEqual(valorNube, null),
-   null,
-   ee.Number(valorNube).multiply(100)
+    // Porcentaje de nube
+    var valorNube = feature.get('nube');
+
+    var porcentajeNube = ee.Algorithms.If(
+      ee.Algorithms.IsEqual(valorNube, null),
+      null,
+      ee.Number(valorNube).multiply(100)
     );
-    
+
+
+    // Porcentaje de sombra
     var valorSombra = feature.get('sombra');
-    
+
     var porcentajeSombra = ee.Algorithms.If(
-    ee.Algorithms.IsEqual(valorSombra, null),
-   null,
-    ee.Number(valorSombra).multiply(100)
+      ee.Algorithms.IsEqual(valorSombra, null),
+      null,
+      ee.Number(valorSombra).multiply(100)
     );
 
 
     return feature.set({
+
       'Sector': sector,
 
       'Sector_fecha': ee.Algorithms.If(
@@ -201,6 +276,7 @@ function datosPorSector(image, fechaMuestreo) {
       'porcentaje_nube_sector': porcentajeNube,
 
       'porcentaje_sombra_sector': porcentajeSombra
+
     });
 
   });
@@ -262,7 +338,7 @@ resultados = resultados.sort('fecha_muestreo');
 // ------------------------------------------------------
 
 print(
-  'Sentinel-2: indices y nubosidad por sector',
+  'Sentinel-2: indices enmascarados y nubosidad por sector',
   resultados
 );
 
@@ -293,12 +369,14 @@ var columnasCSV = [
   'porcentaje_sombra_sector',
   'NDVI',
   'SAVI',
-  'EVI'
+  'EVI',
+  'NDMI',
+  'MSI'
 ];
 
 Export.table.toDrive({
   collection: resultados.select(columnasCSV),
-  description: 'Sentinel2_NDVI_SAVI_EVI_por_sector',
+  description: 'Sentinel2_indices_enmascarados_nubes_sombras_por_sector',
   fileFormat: 'CSV',
   selectors: columnasCSV
 });
