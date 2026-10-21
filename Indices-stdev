@@ -1,10 +1,10 @@
 
 // ======================================================
-// SENTINEL-2: DESVIACION ESTANDAR + NUBOSIDAD
-// Todas las imagenes disponibles +/- 5 dias
-// NDVI, SAVI, EVI, NDMI y MSI
-// Indices calculados con mascara de nubes y sombras
-// Se agrega conteo de pixeles validos por sector
+// SENTINEL-2: SD DE INDICES POR SECTOR Y FECHA EXACTA
+// 19 fechas especificas
+// 52 sectores por fecha
+// Sin ventana temporal +/- dias
+// Incluye conteo de pixeles validos por indice
 // ======================================================
 
 
@@ -16,34 +16,33 @@ var sectores = ee.FeatureCollection(
   'projects/ee-fernandatuesta/assets/sendero30x10m_52s'
 );
 
-print('Primer sector:', sectores.first());
-print('Lista de propiedades:', sectores.first().propertyNames());
+print('Cantidad de sectores:', sectores.size());
 
 Map.addLayer(sectores, {}, 'Sectores');
 Map.centerObject(sectores);
 
 
 // ------------------------------------------------------
-// 2. FECHAS DE MUESTREO
+// 2. FECHAS EXACTAS
 // ------------------------------------------------------
 
 var fechas = [
   '2023-10-04',
   '2023-10-09',
-  '2023-11-11',
-  '2023-12-11',
-  '2024-01-05',
-  '2024-01-26',
-  '2024-03-07',
+  '2023-11-08',
+  '2023-12-10',
+  '2024-01-04',
+  '2024-01-27',
+  '2024-03-12',
   '2024-03-29',
   '2024-04-18',
-  '2024-05-10',
-  '2024-06-06',
-  '2024-07-18',
-  '2024-08-15',
-  '2024-09-24',
+  '2024-05-11',
+  '2024-06-10',
+  '2024-07-17',
+  '2024-08-14',
+  '2024-09-20',
   '2024-10-03',
-  '2024-10-26',
+  '2024-10-25',
   '2024-11-09',
   '2024-12-09',
   '2024-12-27'
@@ -60,106 +59,15 @@ var S2 = ee.ImageCollection(
 
 
 // ------------------------------------------------------
-// 4. CALCULAR NDVI, SAVI, EVI, NDMI Y MSI
+// 4. CALCULAR INDICES CON MASCARA
 // ------------------------------------------------------
 
-function calcularIndices(image) {
+function prepararIndices(image) {
 
-  // NDVI: verdor de la vegetacion
-  var NDVI = image.normalizedDifference([
-    'B8',
-    'B4'
-  ]).rename('NDVI');
-
-
-  // Reflectancia escalada de 0 a 1
-  var NIR = image.select('B8').multiply(0.0001);
-  var RED = image.select('B4').multiply(0.0001);
-  var BLUE = image.select('B2').multiply(0.0001);
-
-
-  // SAVI: indice ajustado por el suelo (L = 0.5)
-  var SAVI = NIR.subtract(RED)
-    .multiply(1.5)
-    .divide(
-      NIR.add(RED).add(0.5)
-    )
-    .rename('SAVI');
-
-
-  // EVI: indice de vegetacion mejorado
-  var EVI = NIR.subtract(RED)
-    .multiply(2.5)
-    .divide(
-      NIR
-        .add(RED.multiply(6))
-        .subtract(BLUE.multiply(7.5))
-        .add(1)
-    )
-    .rename('EVI');
-
-
-  // NDMI: indice de humedad de la vegetacion
-  var NDMI = image.normalizedDifference([
-    'B8',
-    'B11'
-  ]).rename('NDMI');
-
-
-  // MSI: indice de estres hidrico
-  // Valores altos suelen indicar menor contenido de agua
-  var MSI = image.select('B11')
-    .divide(image.select('B8'))
-    .rename('MSI');
-
-
-  return image.addBands([
-    NDVI,
-    SAVI,
-    EVI,
-    NDMI,
-    MSI
-  ]);
-}
-
-
-// ------------------------------------------------------
-// 5. MASCARA DE NUBES Y SOMBRAS + DATOS POR SECTOR
-// ------------------------------------------------------
-
-function datosPorSector(image, fechaMuestreo) {
-
-  // Conservar la clasificacion SCL original
   var scl = image.select('SCL');
 
-
-  // --------------------------------------------------
-  // 5A. IDENTIFICAR NUBES Y SOMBRAS
-  // --------------------------------------------------
-
-  // Nubes: clases 8, 9 y 10
-  var nube = scl.eq(8)
-    .or(scl.eq(9))
-    .or(scl.eq(10))
-    .rename('nube');
-
-  // Sombras de nubes: clase 3
-  var sombra = scl.eq(3)
-    .rename('sombra');
-
-
-  // --------------------------------------------------
-  // 5B. CREAR MASCARA DE PIXELES VALIDOS
-  // --------------------------------------------------
-
-  // Excluir:
-  // 0 = sin datos
-  // 1 = saturado o defectuoso
-  // 3 = sombra de nube
-  // 8 = nube de probabilidad media
-  // 9 = nube de probabilidad alta
-  // 10 = cirros
-
+  // Excluir sin datos, pixeles defectuosos,
+  // sombras de nubes, nubes y cirros.
   var mascara = scl.neq(0)
     .and(scl.neq(1))
     .and(scl.neq(3))
@@ -167,136 +75,133 @@ function datosPorSector(image, fechaMuestreo) {
     .and(scl.neq(9))
     .and(scl.neq(10));
 
+  var limpia = image.updateMask(mascara);
 
-  // Aplicar mascara a las bandas de la imagen
-  var imagenLimpia = image.updateMask(mascara);
+  // Reflectancia escalada entre 0 y 1
+  var nir = limpia.select('B8').multiply(0.0001);
+  var red = limpia.select('B4').multiply(0.0001);
+  var blue = limpia.select('B2').multiply(0.0001);
+  var swir = limpia.select('B11').multiply(0.0001);
+
+  // NDVI
+  var NDVI = nir.subtract(red)
+    .divide(nir.add(red))
+    .updateMask(nir.add(red).neq(0))
+    .rename('NDVI');
+
+  // SAVI (L = 0.5)
+  var SAVI = nir.subtract(red)
+    .multiply(1.5)
+    .divide(nir.add(red).add(0.5))
+    .rename('SAVI');
+
+  // EVI
+  var denominadorEVI = nir
+    .add(red.multiply(6))
+    .subtract(blue.multiply(7.5))
+    .add(1);
+
+  var EVI = nir.subtract(red)
+    .multiply(2.5)
+    .divide(denominadorEVI)
+    .updateMask(denominadorEVI.neq(0))
+    .rename('EVI');
+
+  // NDMI
+  var denominadorNDMI = nir.add(swir);
+
+  var NDMI = nir.subtract(swir)
+    .divide(denominadorNDMI)
+    .updateMask(denominadorNDMI.neq(0))
+    .rename('NDMI');
+
+  // MSI
+  var MSI = swir.divide(nir)
+    .updateMask(nir.neq(0))
+    .rename('MSI');
+
+  return ee.Image.cat([
+    NDVI, SAVI, EVI, NDMI, MSI
+  ]).copyProperties(image, image.propertyNames());
+}
 
 
-  // --------------------------------------------------
-  // 5C. CALCULAR INDICES CON LA MASCARA APLICADA
-  // --------------------------------------------------
+// ------------------------------------------------------
+// 5. CREAR UNA FILA POR SECTOR Y FECHA
+// ------------------------------------------------------
 
-  var imagenIndices = calcularIndices(imagenLimpia)
-    .select([
-      'NDVI',
-      'SAVI',
-      'EVI',
-      'NDMI',
-      'MSI'
-    ]);
+function procesarFecha(fechaTexto) {
 
+  var fecha = ee.Date(fechaTexto);
+  var fin = fecha.advance(1, 'day');
 
-  // --------------------------------------------------
-  // 5D. CALCULAR SD DE LOS INDICES POR SECTOR
-  // --------------------------------------------------
+  // Solo imagenes adquiridas en la fecha exacta.
+  var coleccion = S2
+    .filterDate(fecha, fin)
+    .filterBounds(sectores);
 
-  var imagenExtraccion = imagenIndices.addBands([
-    nube,
-    sombra
-  ]);
+  var cantidadImagenes = coleccion.size();
 
-  var datos = imagenExtraccion.reduceRegions({
-    collection: sectores,
-    reducer: ee.Reducer.stdDev(),
-    scale: 10
+  print(
+    'Imagenes para la fecha exacta ' + fechaTexto,
+    cantidadImagenes
+  );
+
+  // Si hay varias imagenes ese dia, seleccionar
+  // la de menor porcentaje de nubosidad global.
+  var imagen = ee.Image(
+    coleccion.sort('CLOUDY_PIXEL_PERCENTAGE').first()
+  );
+
+  // Si no hay imagen, crear una imagen completamente
+  // enmascarada para conservar las 52 filas.
+  var imagenVacia = ee.Image.constant([
+    0, 0, 0, 0, 0
+  ]).rename([
+    'NDVI', 'SAVI', 'EVI', 'NDMI', 'MSI'
+  ]).updateMask(ee.Image.constant(0));
+
+  var indices = ee.Image(ee.Algorithms.If(
+    cantidadImagenes.gt(0),
+    prepararIndices(imagen),
+    imagenVacia
+  ));
+
+  // Combinar SD y conteo para cada banda.
+  var reductor = ee.Reducer.stdDev().combine({
+    reducer2: ee.Reducer.count(),
+    sharedInputs: true
   });
 
+  var extraidos = indices.reduceRegions({
+    collection: sectores,
+    reducer: reductor,
+    scale: 10,
+    tileScale: 2
+  });
 
-  // --------------------------------------------------
-  // 5E. CONTAR PIXELES VALIDOS DE B8 POR SECTOR
-  // --------------------------------------------------
+  // Garantizar una fila por cada geometria.
+  return extraidos.map(function(feature) {
 
-  // B8 tiene resolucion nativa de 10 m.
-  // El conteo se realiza despues de aplicar la mascara.
-
-  var conteoPixeles = imagenLimpia
-    .select('B8')
-    .reduceRegions({
-      collection: sectores,
-      reducer: ee.Reducer.count(),
-      scale: 10
-    });
-
-
-  // --------------------------------------------------
-  // 5F. INCORPORAR CONTEO Y METADATOS
-  // --------------------------------------------------
-
-  return datos.map(function(feature) {
-
-    var fechaImagen = image.date();
     var sector = feature.get('Sector');
 
-    // Buscar el conteo del mismo sector.
-    var conteo = conteoPixeles
-      .filter(ee.Filter.eq('Sector', sector))
-      .first();
-
-    var pixelesValidos = ee.Algorithms.If(
-      ee.Algorithms.IsEqual(conteo, null),
-      0,
-      conteo.get('B8')
-    );
-
-
-    // Porcentaje de nube
-    // Las bandas nube y sombra no se enmascaran.
-    var valorNube = feature.get('nube');
-
-    var porcentajeNube = ee.Algorithms.If(
-      ee.Algorithms.IsEqual(valorNube, null),
-      null,
-      ee.Number(valorNube).multiply(100)
-    );
-
-
-    // Porcentaje de sombra
-    var valorSombra = feature.get('sombra');
-
-    var porcentajeSombra = ee.Algorithms.If(
-      ee.Algorithms.IsEqual(valorSombra, null),
-      null,
-      ee.Number(valorSombra).multiply(100)
-    );
-
+    var tieneImagen = cantidadImagenes.gt(0);
 
     return feature.set({
 
-      'Sector': sector,
+      'Sector_fecha': ee.String(sector)
+        .cat('_')
+        .cat(fechaTexto),
 
-      'Sector_fecha': ee.Algorithms.If(
-        ee.Algorithms.IsEqual(sector, null),
-        null,
-        ee.String(sector)
-          .cat('_')
-          .cat(fechaMuestreo)
+      'fecha_muestreo': fechaTexto,
+
+      'fecha_imagen': ee.Algorithms.If(
+        tieneImagen,
+        imagen.date().format('YYYY-MM-dd'),
+        null
       ),
 
-      'diferencia_dias': fechaImagen.difference(
-        ee.Date(fechaMuestreo),
-        'day'
-      ),
-
-      'fecha_imagen': fechaImagen.format(
-        'YYYY-MM-dd'
-      ),
-
-      'fecha_muestreo': fechaMuestreo,
-
-      'hora_UTC': fechaImagen.format(
-        'HH:mm:ss',
-        'UTC'
-      ),
-
-      'hora_local': fechaImagen
-        .advance(-3, 'hour')
-        .format('HH:mm:ss', 'UTC'),
-
-      'porcentaje_nube_sector': porcentajeNube,
-
-      'porcentaje_sombra_sector': porcentajeSombra,
-
-      'pixeles_validos': pixelesValidos
+      'hay_imagen': tieneImagen
 
     });
 
@@ -305,100 +210,65 @@ function datosPorSector(image, fechaMuestreo) {
 
 
 // ------------------------------------------------------
-// 6. BUSCAR IMAGENES +/- 5 DIAS
-// ------------------------------------------------------
-
-function buscarFecha(fechaTexto) {
-
-  var fecha = ee.Date(fechaTexto);
-
-  var inicio = fecha.advance(-5, 'day');
-
-  // El limite superior de filterDate es exclusivo.
-  // Con +6 se incluye el dia que corresponde a +5.
-  var fin = fecha.advance(6, 'day');
-
-  var coleccion = S2
-    .filterDate(inicio, fin)
-    .filterBounds(sectores);
-
-  print(
-    'Cantidad de imagenes para ' + fechaTexto,
-    coleccion.size()
-  );
-
-  return coleccion.map(function(image) {
-
-    return datosPorSector(
-      image,
-      fechaTexto
-    );
-
-  }).flatten();
-}
-
-
-// ------------------------------------------------------
-// 7. APLICAR A TODAS LAS FECHAS
+// 6. PROCESAR LAS 19 FECHAS
 // ------------------------------------------------------
 
 var resultados = ee.FeatureCollection(
-  fechas.map(buscarFecha)
+  fechas.map(procesarFecha)
 ).flatten();
 
 
 // ------------------------------------------------------
-// 8. ORDENAR RESULTADOS
+// 7. ORDENAR Y VERIFICAR
 // ------------------------------------------------------
 
-resultados = resultados.sort('fecha_muestreo');
+resultados = resultados
+  .sort('fecha_muestreo')
+  .sort('Sector');
 
-
-// ------------------------------------------------------
-// 9. MOSTRAR RESULTADOS
-// ------------------------------------------------------
+print('Resultados:', resultados);
 
 print(
-  'Sentinel-2: SD de indices, nubosidad y pixeles validos',
-  resultados
-);
-
-print(
-  'Cantidad total de registros',
+  'Total de filas (esperado: 988 si hay 52 sectores):',
   resultados.size()
 );
 
 print(
-  'Propiedades del primer resultado:',
-  resultados.first().propertyNames()
+  'Primer registro:',
+  resultados.first()
 );
 
 
 // ------------------------------------------------------
-// 10. EXPORTAR CSV CON COLUMNAS SELECCIONADAS
+// 8. EXPORTAR CSV
 // ------------------------------------------------------
 
 var columnasCSV = [
   'Sector',
   'Sector_fecha',
-  'diferencia_dias',
-  'fecha_imagen',
   'fecha_muestreo',
-  'hora_UTC',
-  'hora_local',
-  'porcentaje_nube_sector',
-  'porcentaje_sombra_sector',
-  'pixeles_validos',
+  'fecha_imagen',
+  'hay_imagen',
+
   'NDVI_stdDev',
+  'NDVI_count',
+
   'SAVI_stdDev',
+  'SAVI_count',
+
   'EVI_stdDev',
+  'EVI_count',
+
   'NDMI_stdDev',
-  'MSI_stdDev'
+  'NDMI_count',
+
+  'MSI_stdDev',
+  'MSI_count'
 ];
 
 Export.table.toDrive({
   collection: resultados.select(columnasCSV),
-  description: 'Sentinel2_SD_indices_pixeles_validos_por_sector',
+  description: 'Sentinel2_SD_indices_52sectores_fechas_exactas',
   fileFormat: 'CSV',
   selectors: columnasCSV
 });
