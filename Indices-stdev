@@ -1,10 +1,10 @@
 
- // ======================================================
-// SENTINEL-2: NUBOSIDAD + DESVIACION ESTANDAR DE INDICES
+// ======================================================
+// SENTINEL-2: DESVIACION ESTANDAR + NUBOSIDAD
 // Todas las imagenes disponibles +/- 5 dias
 // NDVI, SAVI, EVI, NDMI y MSI
 // Indices calculados con mascara de nubes y sombras
-// Porcentajes de nube y sombra calculados por separado
+// Se agrega conteo de pixeles validos por sector
 // ======================================================
 
 
@@ -159,8 +159,6 @@ function datosPorSector(image, fechaMuestreo) {
   // 8 = nube de probabilidad media
   // 9 = nube de probabilidad alta
   // 10 = cirros
-  //
-  // Se conservan las demas clases SCL.
 
   var mascara = scl.neq(0)
     .and(scl.neq(1))
@@ -189,21 +187,14 @@ function datosPorSector(image, fechaMuestreo) {
 
 
   // --------------------------------------------------
-  // 5D. EXTRAER INDICES Y PORCENTAJES POR SEPARADO
+  // 5D. CALCULAR SD DE LOS INDICES POR SECTOR
   // --------------------------------------------------
-
-  // Las bandas nube y sombra provienen del SCL original.
-  // No se enmascaran: permiten cuantificar los pixeles
-  // clasificados como nube o sombra.
 
   var imagenExtraccion = imagenIndices.addBands([
     nube,
     sombra
   ]);
 
-
-  // Desviacion estandar por sector.
-  // Cada banda se reduce usando sus propios pixeles validos.
   var datos = imagenExtraccion.reduceRegions({
     collection: sectores,
     reducer: ee.Reducer.stdDev(),
@@ -212,7 +203,23 @@ function datosPorSector(image, fechaMuestreo) {
 
 
   // --------------------------------------------------
-  // 5E. AGREGAR METADATOS Y PORCENTAJES
+  // 5E. CONTAR PIXELES VALIDOS DE B8 POR SECTOR
+  // --------------------------------------------------
+
+  // B8 tiene resolucion nativa de 10 m.
+  // El conteo se realiza despues de aplicar la mascara.
+
+  var conteoPixeles = imagenLimpia
+    .select('B8')
+    .reduceRegions({
+      collection: sectores,
+      reducer: ee.Reducer.count(),
+      scale: 10
+    });
+
+
+  // --------------------------------------------------
+  // 5F. INCORPORAR CONTEO Y METADATOS
   // --------------------------------------------------
 
   return datos.map(function(feature) {
@@ -220,8 +227,20 @@ function datosPorSector(image, fechaMuestreo) {
     var fechaImagen = image.date();
     var sector = feature.get('Sector');
 
+    // Buscar el conteo del mismo sector.
+    var conteo = conteoPixeles
+      .filter(ee.Filter.eq('Sector', sector))
+      .first();
+
+    var pixelesValidos = ee.Algorithms.If(
+      ee.Algorithms.IsEqual(conteo, null),
+      0,
+      conteo.get('B8')
+    );
+
 
     // Porcentaje de nube
+    // Las bandas nube y sombra no se enmascaran.
     var valorNube = feature.get('nube');
 
     var porcentajeNube = ee.Algorithms.If(
@@ -275,7 +294,9 @@ function datosPorSector(image, fechaMuestreo) {
 
       'porcentaje_nube_sector': porcentajeNube,
 
-      'porcentaje_sombra_sector': porcentajeSombra
+      'porcentaje_sombra_sector': porcentajeSombra,
+
+      'pixeles_validos': pixelesValidos
 
     });
 
@@ -338,7 +359,7 @@ resultados = resultados.sort('fecha_muestreo');
 // ------------------------------------------------------
 
 print(
-  'Sentinel-2: desviacion estandar de indices y nubosidad por sector',
+  'Sentinel-2: SD de indices, nubosidad y pixeles validos',
   resultados
 );
 
@@ -367,6 +388,7 @@ var columnasCSV = [
   'hora_local',
   'porcentaje_nube_sector',
   'porcentaje_sombra_sector',
+  'pixeles_validos',
   'NDVI_stdDev',
   'SAVI_stdDev',
   'EVI_stdDev',
@@ -376,7 +398,7 @@ var columnasCSV = [
 
 Export.table.toDrive({
   collection: resultados.select(columnasCSV),
-  description: 'Sentinel2_desviacion_estandar_indices_por_sector',
+  description: 'Sentinel2_SD_indices_pixeles_validos_por_sector',
   fileFormat: 'CSV',
   selectors: columnasCSV
 });
